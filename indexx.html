@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>VitaSphere — SDG3 Prototype</title>
+
+<!-- React -->
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Leaflet (Map) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  *{box-sizing:border-box;font-family:Arial, sans-serif;}
+  body{margin:0;transition:background 0.3s,color 0.3s;}
+  body.light{background:url('https://images.unsplash.com/photo-1505751172876-fa1923c5c528?w=1600') center/cover fixed;color:#222;}
+  body.dark{background:#0b172a;color:#eee;}
+  .container{max-width:1100px;margin:20px auto;padding:18px;}
+  header{display:flex;justify-content:space-between;align-items:center}
+  .logo{font-size:24px;font-weight:900;color:#16a34a}
+  .controls{display:flex;gap:8px}
+  .btn{background:#16a34a;color:#fff;padding:8px 12px;border-radius:6px;border:none;cursor:pointer;font-weight:600}
+  .btn.alt{background:#06b6d4}
+  .card{background:rgba(255,255,255,0.9);padding:14px;border-radius:10px;box-shadow:0 4px 12px rgba(0,0,0,0.2)}
+  body.dark .card{background:rgba(0,0,0,0.6);color:#fff;}
+  input[type="text"]{padding:8px;border-radius:6px;border:1px solid #ccc;margin-right:8px}
+  .grid{display:grid;gap:14px;margin-top:14px}
+  @media(min-width:900px){.grid.cols-2{grid-template-columns:1fr 1fr}.grid.cols-3{grid-template-columns:1fr 1fr 1fr}}
+  .map{height:320px;border-radius:10px;}
+  .list{margin-top:10px}
+  .list a{font-weight:600;text-decoration:none}
+  /* Modal */
+  .modal{position:fixed;top:0;left:0;width:100%;height:100%;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);z-index:1000}
+  .modal-content{background:#fff;color:#222;padding:20px;border-radius:12px;max-width:600px;width:90%;}
+  .close{float:right;cursor:pointer;font-weight:700}
+</style>
+</head>
+<body class="light">
+<div id="root" class="container"></div>
+
+<!-- Medical Agent Modal -->
+<div id="agentModal" class="modal">
+  <div class="modal-content">
+    <span id="closeModal" class="close">✖</span>
+    <h2>Medical Assistant</h2>
+    <input id="age" placeholder="Age"/><br/><br/>
+    <input id="sym" placeholder="Symptom"/><br/><br/>
+    <input id="dur" placeholder="Duration (days)"/><br/><br/>
+    <button class="btn" onclick="runAgent()">Get Advice</button>
+    <div id="agentResult" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<script type="text/babel">
+const {useState,useEffect} = React;
+
+const LOCALES = {
+  en:{theme:"Dark/Light",lang:"हिंदी",tips:"Tip of the Day",bmi:"BMI",pulse:"Heartbeat",hosp:"Nearby Hospitals"},
+  hi:{theme:"डार्क/लाइट",lang:"EN",tips:"आज का सुझाव",bmi:"बीएमआई",pulse:"हृदय गति",hosp:"पास के अस्पताल"}
+};
+
+// ---- Components ----
+function Tips({t}){
+  const tips=["Drink water 💧","Walk daily 🚶","Sleep 7–8 hours 😴","Eat fruits 🍎","Avoid smoking 🚭"];
+  const [tip,setTip]=useState(tips[Math.floor(Math.random()*tips.length)]);
+  return <div className="card"><h2>{t.tips}</h2><p>{tip}</p><button className="btn alt" onClick={()=>setTip(tips[Math.floor(Math.random()*tips.length)])}>New</button></div>;
+}
+
+function BMI({t}){
+  const [res,setRes]=useState("-");
+  const [w,setW]=useState(""),[h,setH]=useState("");
+  function calc(){
+    let W=+w,H=(+h)/100;
+    if(!W||!H) return setRes("Enter values");
+    let bmi=(W/(H*H)).toFixed(1);
+    let m="Normal";if(bmi<18.5)m="Underweight";else if(bmi>25)m="Overweight";
+    setRes(BMI ${bmi} • ${m});
+  }
+  return <div className="card"><h2>{t.bmi}</h2>
+    <input value={w} onChange={e=>setW(e.target.value)} placeholder="Weight kg"/>
+    <input value={h} onChange={e=>setH(e.target.value)} placeholder="Height cm"/>
+    <button className="btn" onClick={calc}>Check</button><p>{res}</p>
+  </div>;
+}
+
+function Pulse({t}){
+  const [count,setCount]=useState(0),[msg,setMsg]=useState("Tap when you feel heartbeat"),[start,setStart]=useState(null);
+  function tap(){
+    if(!start){setStart(Date.now());setCount(1);setMsg("Keep tapping...");}
+    else{let c=count+1;setCount(c);let dur=(Date.now()-start)/1000;let bpm=(c/dur)*60;setMsg(BPM ~ ${bpm.toFixed(0)});}
+  }
+  return <div className="card"><h2>{t.pulse}</h2><p>{msg}</p><button className="btn" onClick={tap}>Tap</button></div>;
+}
+
+function Hospitals({t}){
+  const [mapObj,setMapObj] = useState(null);
+  const [list,setList] = useState([]);
+
+  function makeDirURL(dest){return https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)};}
+
+  function initMap(lat,lng,label="📍 You are here"){
+    if(mapObj) mapObj.remove();
+    const map = L.map("hmap").setView([lat,lng],13.5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    L.marker([lat,lng]).addTo(map).bindPopup(label).openPopup();
+    setMapObj(map);
+    setList([]);
+    return map;
+  }
+
+  function useMyLocation(){
+    if(!navigator.geolocation) return alert("Geolocation not supported.");
+    navigator.geolocation.getCurrentPosition(pos=>{
+      const {latitude,longitude} = pos.coords;
+      const map = initMap(latitude, longitude);
+      const sample = [
+        { name:"City Hospital",       rating:"★★★★☆", dest:${latitude+0.01},${longitude+0.01} },
+        { name:"LifeCare Clinic",     rating:"★★★☆☆", dest:${latitude-0.008},${longitude+0.012} },
+        { name:"Apollo Health",       rating:"★★★★★", dest:${latitude+0.007},${longitude-0.009} }
+      ];
+      const hospitalsWithPos = sample.map((h, i)=>({
+        ...h,
+        pos: [
+          [latitude+0.01, longitude+0.01],
+          [latitude-0.008, longitude+0.012],
+          [latitude+0.007, longitude-0.009]
+        ][i]
+      }));
+      hospitalsWithPos.forEach(h=>{
+        const url = makeDirURL(h.dest);
+        L.marker(h.pos).addTo(map).bindPopup(
+          <b>${h.name}</b><br/>Rating: ${h.rating}<br/><a href="${url}" target="_blank">📍 Directions</a>
+        );
+      });
+      setList(hospitalsWithPos.map(h=>({name:h.name,rating:h.rating,url:makeDirURL(h.dest)})));
+    }, ()=>alert("Location access denied."));
+  }
+
+  return <div className="card">
+    <h2>{t.hosp}</h2>
+    <div style={{marginBottom:"8px"}}>
+      <button className="btn" onClick={useMyLocation}>Use My Location</button>
+    </div>
+    <div id="hmap" className="map"></div>
+    <div className="list">
+      {list.length>0 && <>
+        <h3 style={{marginTop:"12px"}}>Hospitals Near You</h3>
+        <ol>
+          {list.map((it,idx)=>
+            <li key={idx}>{it.name} • {it.rating} • <a href={it.url} target="_blank" rel="noopener noreferrer">Directions</a></li>
+          )}
+        </ol>
+      </>}
+    </div>
+  </div>;
+}
+
+function App(){
+  const [theme,setTheme]=useState("light"),[loc,setLoc]=useState("en");
+  useEffect(()=>{document.body.classList.remove("light","dark");document.body.classList.add(theme);},[theme]);
+  return <div>
+    <header><div className="logo">🌿 VitaSphere</div>
+      <div className="controls">
+        <button className="btn alt" onClick={()=>setTheme(theme==="light"?"dark":"light")}>{LOCALES[loc].theme}</button>
+        <button className="btn alt" onClick={()=>setLoc(loc==="en"?"hi":"en")}>{LOCALES[loc].lang}</button>
+        <button className="btn" onClick={()=>document.getElementById("agentModal").style.display="flex"}>Agent</button>
+      </div>
+    </header>
+    <div className="grid cols-3">
+      <Tips t={LOCALES[loc]}/><BMI t={LOCALES[loc]}/><Pulse t={LOCALES[loc]}/>
+    </div>
+    <div className="grid cols-1">
+      <Hospitals t={LOCALES[loc]}/>
+    </div>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+<script>
+document.getElementById("closeModal").onclick=()=>document.getElementById("agentModal").style.display="none";
+function runAgent(){
+  let a=document.getElementById("age").value,s=document.getElementById("sym").value.toLowerCase(),d=document.getElementById("dur").value;
+  let out="Self-care is fine.";
+  if(s.includes("chest")) out="⚠ Emergency! Seek help immediately.";
+  else if(+d>3) out="Better consult a doctor soon.";
+  document.getElementById("agentResult").innerText=out;
+}
+</script>
+</body>
+</html>
